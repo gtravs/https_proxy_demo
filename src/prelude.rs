@@ -6,7 +6,7 @@ pub use tokio::{sync::Semaphore, task::JoinSet};
 pub use std::result::Result::Ok;
 pub const MAX_CONCURRENT_REQUESTS: usize = 100;
 
-#[derive(Debug,Clone,PartialEq,Eq,Hash,Default)]
+#[derive(Debug,Clone,PartialEq,Eq,Hash,Default,serde::Serialize)]
 pub enum Method {
     #[default] GET,
      POST,
@@ -51,7 +51,7 @@ impl Method {
     }
 }
 
-#[derive(Clone,Debug,Default)]
+#[derive(Clone,Debug,Default,serde::Serialize)]
 pub struct Request {
     pub method : Method,
     pub url : String,
@@ -62,6 +62,9 @@ pub struct Request {
 
 impl Request {
 
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("Failed to serialize Request")
+    }
     // 请求数据转换解析
     pub fn from_string(raw_data:&str) -> Option<Self> {
         let mut  lines = raw_data.lines();
@@ -121,15 +124,18 @@ impl Request {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default,serde::Serialize)]
 pub struct Response {
-    pub status_code: u16,
+    pub status_code: String,
     pub message: String,
     pub data: Option<String>,
     pub error: Option<String>,
 }
 
 impl Response {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        serde_json::to_vec(self).expect("Failed to serialize Request")
+    }
     /// 从HTTP响应字符串解析出Response
     pub fn from_string(raw_response: &str) -> Result<Self, anyhow::Error> {
         let mut response = Response::default();
@@ -140,8 +146,7 @@ impl Response {
             let parts: Vec<&str> = status_line.split_whitespace().collect();
             if parts.len() >= 2 {
                 // 提取状态码
-                response.status_code = parts[1].parse::<u16>()
-                    .map_err(|_| anyhow::anyhow!("Invalid status code in response"))?;
+                response.status_code = parts[1].to_string();
                 // 提取消息
                 if parts.len() > 2 {
                     response.message = parts[2..].join(" ");
@@ -161,9 +166,9 @@ impl Response {
         }
 
         // 如果状态码表示错误，填充到 error 字段
-        if response.status_code >= 400 {
-            response.error = Some(response.message.clone());
-        }
+        // if response.status_code >= "400" {
+        //     response.error = Some(response.message.clone());
+        // }
 
         Ok(response)
     }

@@ -1,11 +1,22 @@
-use std::{net::SocketAddr, sync::mpsc::channel, thread::spawn};
-use anyhow::Context;
+use std::{future::ready, net::SocketAddr, sync::mpsc::channel, thread::spawn};
+use anyhow::Context as ct;
 use rustls::{client, ClientConfig};
 use time::SystemTime;
-use tokio::{io::{copy_bidirectional, AsyncReadExt, AsyncWriteExt}, net::TcpStream, sync::Mutex};
+use tokio::{io::{ AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::TcpStream, sync::Mutex};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use crate::prelude::*;
+use crate::{debug_stream::copy_bidirectional, prelude::*};
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::task::{ready, Context, Poll};
 
+use crate::copy::{CopyBuffer, Direction};
+
+enum TransferState {
+    Running(CopyBuffer),
+    ShuttingDown(u64),
+    Done(u64),
+}
 
 #[derive(Debug,Clone)]
 pub struct Session{
@@ -41,6 +52,15 @@ impl Session {
         self.response = resp;
     }
 
+    // 新增方法以获取请求体和响应体的原始数据
+    pub fn get_request_data(&self) -> String {
+        String::from_utf8_lossy(&self.request.to_bytes()).to_string()
+    }
+
+    pub fn get_response_data(&self) -> String {
+        String::from_utf8_lossy(&self.response.to_bytes()).to_string()
+    }
+
     pub async  fn session_connect(&mut self,addr:SocketAddr) {
         //println!("[CONNECT SATRT {}]",self.session_id);
         //println!(" -> connection new {addr:?}");
@@ -57,9 +77,11 @@ impl Session {
 
 
     pub async fn handle_https(&mut self,host:String,port:String,ca_cert: Arc<CertifiedKey>) -> Result<(), anyhow::Error> {
-
         let mut client_stream = self.stream.as_ref().unwrap().lock().await;
-        client_stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await.context("[-] Failed to write http/1.1 200."); 
+        client_stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await.context("[-] Failed to write http/1.1 200.")?;
+        // let mut client_stream = self.stream.as_ref().unwrap().lock().await;
+        // client_stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await.context("[-] Failed to write http/1.1 200."); 
+        drop(client_stream);
         let server_cert = generate_signed_cert(&ca_cert.cert, &ca_cert.key_pair, host.clone()).await?;
         let  server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -71,14 +93,9 @@ impl Session {
         );
         let mut server  = rustls::ServerConnection::new(Arc::new(server_config.clone()))?;
         let tls_acceptor = TlsAcceptor::from(Arc::new(server_config.clone()));
-        // 将客户端流升级为 TLS 流
-        let  mut tls_stream = match tls_acceptor.accept(&mut *client_stream).await{
-            Ok(stream) =>  {stream},
-            Err(e) => {
-                eprintln!("[-] TLS handshake failed: {:?}", e);
-                return Ok(());
-            }
-        };
+
+
+
         let cert_der = CertificateDer::from_pem_file("ca.crt").expect("[-] Failed to RootCertStore read ca.crt");
         let cert_der_iter = vec![cert_der];
         root_store.add_parsable_certificates(cert_der_iter);
@@ -101,88 +118,30 @@ impl Session {
                         }
                     };
 
-                    
-                    let mut total_request_bytes = 0;
-                    let mut total_response_bytes = 0;
-                    let mut buffer_req = vec![0u8; 8192];
-                    let mut buffer_resp = vec![0u8; 8192];
-                    loop {
-                        // 从客户端读取数据
-                        match tls_stream.read(&mut buffer_req).await {
-                            Ok(0) => {
-                                // 客户端关闭连接
-                                println!("[INFO] Client disconnected after sending all request data.");
-                                drop(buffer_req);
-                                break;
-                            }
-                            Ok(n) => {
-                                // 更新请求总字节数
-                                total_request_bytes += n;
-                    
-                                // 打印读取的请求数据
-                                let raw_data = String::from_utf8((&buffer_req[..n]).to_vec()).context("[-] connect recv data bytes failed to string.")?;
-                                let res = Request::from_string(raw_data.as_str()).unwrap();
-                                self.request = res;
-                    
-                                // 将数据写入目标服务器
-                                if let Err(e) = target_tls_stream.write_all(&buffer_req[..n]).await {
-                                    eprintln!("[-] Failed to write to target server: {:?}", e);
-                                    break;
-                                }
-                                
-                                println!("[INFO] Sent {} bytes to target server.", n);
-                            }
-                            Err(e) => {
-                                eprintln!("[-] Error reading from client: {:?}", e);
-                                break;
-                            }
+                    let mut client_stream = self.stream.as_ref().unwrap().lock().await;
+                    // 传递引用而非移动
+                    let  mut tls_stream = match tls_acceptor.accept(&mut *client_stream).await {
+                        Ok(stream) => stream,
+                        Err(e) => {
+                            eprintln!("[-] TLS handshake failed: {:?}", e);
+                            return Ok(());
                         }
-                    
-                        // 从目标服务器读取响应
-                        match target_tls_stream.read(&mut buffer_resp).await {
-                            Ok(0) => {
-                                // 目标服务器关闭连接
-                                println!("[INFO] Target server disconnected after sending {} bytes.", total_response_bytes);
-                                drop(buffer_resp);
-                                break;
-                            }
-                            Ok(n) => {
-                                // 更新响应总字节数
-                                total_response_bytes += n;
-                    
-                                // 打印接收的响应数据
-                                let raw_data = String::from_utf8((&buffer_resp[..n]).to_vec()).context("[-] connect recv data bytes failed to string.")?;
-                                let resp = Response::from_string(raw_data.as_str())?;
-                                self.response = resp;
-                                // 将响应写回客户端
-                                if let Err(e) = tls_stream.write_all(&buffer_resp[..n]).await {
-                                    eprintln!("[-] Failed to write to client: {:?}", e);
-                                    break;
-                                }
-                                println!("[INFO] Sent {} bytes back to client.", n);
-                                //drop(buffer_resp);
-                            }
-                            Err(e) => {
-                                eprintln!("[-] Error reading from target: {:?}", e);
-                                break;
-                            }
+                    }; 
+
+
+                    match copy_bidirectional(&mut tls_stream, &mut target_tls_stream).await {
+                        Ok(((from_client_byte,from_client_data), (from_server_byte,from_server_data))) => {
+                            let req = Request::from_string(&from_client_data).unwrap();
+                            self.request = req;
+                            
+                            let resp = Response::from_string(&from_server_data).unwrap();
+                            self.response = resp;
+                            //println!("  [HANDLE {}] Connection closed: {} \n{} bytes from client, {}\n{} bytes from server", self.session_id,from_client_data,from_client_byte, from_server_data,from_server_byte);
+                        }
+                        Err(e) => {
+                            //eprintln!(" [-] Error during bidirectional copy: {:?}", e);
                         }
                     }
-                    
-                    // 打印请求完成的总信息
-                    println!("[INFO] Request completed. Total request bytes: {}, Total response bytes: {}\n", total_request_bytes, total_response_bytes);
-
-
-
-                    // match copy_bidirectional(&mut tls_stream, &mut target_tls_stream).await {
-                    //     Ok((from_client, from_server)) => {
-
-                    //         println!("  [HANDLE {}] Connection closed: {} bytes from client, {} bytes from server", self.session_id,from_client, from_server);
-                    //     }
-                    //     Err(e) => {
-                    //         eprintln!(" [-] Error during bidirectional copy: {:?}", e);
-                    //     }
-                    // }
                 },
                 Err(e) => {
                     eprintln!("[-] Connection error: {:?}", e);
@@ -191,4 +150,122 @@ impl Session {
         Ok(())
 
     }
+
+
+//    pub  fn transfer_one_direction<A, B>(
+//         &mut self,
+//         cx: &mut Context<'_>,
+//         state: &mut TransferState,
+//         r: &mut A,
+//         w: &mut B,
+//     ) -> Poll<io::Result<u64>>
+//     where
+//         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+//         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+//     {
+//         let mut r = Pin::new(r);
+//         let mut w = Pin::new(w);
+    
+//         loop {
+//             match state {
+//                 TransferState::Running(buf) => {
+    
+//                     let count = ready!(buf.poll_copy(cx, r.as_mut(), w.as_mut()))?;
+//                     // 打印每次拷贝的字节数
+//                     println!("[INFO] Copied {} bytes", count);
+    
+//                     match buf.direction {
+//                         Direction::Request => {
+//                             let raw_data  = String::from_utf8_lossy(&buf.buf[..count as usize]);
+//                             let res = Request::from_string(&raw_data).unwrap();
+//                             self.request = res;
+//                             // println!("[INFO] Request Data Copied:\n {}", String::from_utf8_lossy(&buf.buf[..count as usize]));
+//                         }
+//                         Direction::Response => {
+//                             let raw_data  = String::from_utf8_lossy(&buf.buf[..count as usize]);
+//                             let resp = Response::from_string(&raw_data).unwrap();
+//                             self.response = resp;
+//                             // println!("[INFO] Response Data Copied:\n {}", String::from_utf8_lossy(&buf.buf[..count as usize]));
+//                         }
+//                     }
+//                     *state = TransferState::ShuttingDown(count);
+    
+//                 }
+//                 TransferState::ShuttingDown(count) => {
+//                     ready!(w.as_mut().poll_shutdown(cx))?;
+    
+//                     *state = TransferState::Done(*count);
+//                 }
+//                 TransferState::Done(count) => return Poll::Ready(Ok(*count)),
+//             }
+//         }
+//     }
+    
+
+//     pub async fn copy_bidirectional<A, B>(&mut self,a: &mut A, b: &mut B) -> io::Result<(u64, u64)>
+//     where
+//         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+//         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+//     {
+//         self.copy_bidirectional_impl(
+//             a,
+//             b,
+//             CopyBuffer::new(super::DEFAULT_BUF_SIZE, Direction::Request),
+//             CopyBuffer::new(super::DEFAULT_BUF_SIZE, Direction::Response),
+//         )
+//         .await
+//     }
+    
+//     pub  async fn copy_bidirectional_impl<A, B>(
+//         &mut self,
+//         a: &mut A,
+//         b: &mut B,
+//         a_to_b_buffer: CopyBuffer,
+//         b_to_a_buffer: CopyBuffer,
+//     ) -> io::Result<(u64, u64)>
+//     where
+//         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+//         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+//     {
+//         let mut a_to_b = TransferState::Running(a_to_b_buffer);
+//         let mut b_to_a = TransferState::Running(b_to_a_buffer);
+//         poll_fn(|cx| {
+//             let a_to_b = self.transfer_one_direction(cx, &mut a_to_b, a, b)?;
+//             let b_to_a = self.transfer_one_direction(cx, &mut b_to_a, b, a)?;
+    
+//             // It is not a problem if ready! returns early because transfer_one_direction for the
+//             // other direction will keep returning TransferState::Done(count) in future calls to poll
+//             let a_to_b = ready!(a_to_b);
+//             let b_to_a = ready!(b_to_a);
+    
+//             Poll::Ready(Ok((a_to_b, b_to_a)))
+//         })
+//         .await
+//     }
+//     /// Copies data in both directions between `a` and `b` using buffers of the specified size.
+//     ///
+//     /// This method is the same as the [`copy_bidirectional()`], except that it allows you to set the
+//     /// size of the internal buffers used when copying data.
+//     #[cfg_attr(docsrs, doc(cfg(feature = "io-util")))]
+//     pub async fn copy_bidirectional_with_sizes<A, B>(
+//         &mut self,
+//         a: &mut A,
+//         b: &mut B,
+//         a_to_b_buf_size: usize,
+//         b_to_a_buf_size: usize,
+//     ) -> io::Result<(u64, u64)>
+//     where
+//         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
+//         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
+//     {
+//         self.copy_bidirectional_impl(
+//             a,
+//             b,
+//             CopyBuffer::new(a_to_b_buf_size,Direction::Request),
+//             CopyBuffer::new(b_to_a_buf_size,Direction::Response),
+//         )
+//         .await
+//     }
+    
 }
+

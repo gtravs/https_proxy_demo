@@ -1,7 +1,7 @@
 #![allow(unused)]
+pub const DEFAULT_BUF_SIZE: usize = 8192;
 
 use std::thread::JoinHandle;
-
 use anyhow::Context;
 use prelude::*;
 use session::{Session};
@@ -12,8 +12,8 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 mod prelude;
 mod ca_cert;
 mod session;
-
-
+mod debug_stream;
+mod copy;
 // set_proxy_port
 async fn set_proxy_port(host: String, port: u32) -> Result<tokio::net::TcpListener, anyhow::Error> {
     let addr = format!("{}:{}", host, port);
