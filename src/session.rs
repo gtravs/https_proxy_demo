@@ -133,7 +133,7 @@ impl Session {
                         Ok(((from_client_byte,from_client_data), (from_server_byte,from_server_data))) => {
                             let req = Request::from_string(&from_client_data).unwrap();
                             self.request = req;
-                            
+
                             let resp = Response::from_string(&from_server_data).unwrap();
                             self.response = resp;
                             //println!("  [HANDLE {}] Connection closed: {} \n{} bytes from client, {}\n{} bytes from server", self.session_id,from_client_data,from_client_byte, from_server_data,from_server_byte);
@@ -151,121 +151,6 @@ impl Session {
 
     }
 
-
-//    pub  fn transfer_one_direction<A, B>(
-//         &mut self,
-//         cx: &mut Context<'_>,
-//         state: &mut TransferState,
-//         r: &mut A,
-//         w: &mut B,
-//     ) -> Poll<io::Result<u64>>
-//     where
-//         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-//         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
-//     {
-//         let mut r = Pin::new(r);
-//         let mut w = Pin::new(w);
-    
-//         loop {
-//             match state {
-//                 TransferState::Running(buf) => {
-    
-//                     let count = ready!(buf.poll_copy(cx, r.as_mut(), w.as_mut()))?;
-//                     // 打印每次拷贝的字节数
-//                     println!("[INFO] Copied {} bytes", count);
-    
-//                     match buf.direction {
-//                         Direction::Request => {
-//                             let raw_data  = String::from_utf8_lossy(&buf.buf[..count as usize]);
-//                             let res = Request::from_string(&raw_data).unwrap();
-//                             self.request = res;
-//                             // println!("[INFO] Request Data Copied:\n {}", String::from_utf8_lossy(&buf.buf[..count as usize]));
-//                         }
-//                         Direction::Response => {
-//                             let raw_data  = String::from_utf8_lossy(&buf.buf[..count as usize]);
-//                             let resp = Response::from_string(&raw_data).unwrap();
-//                             self.response = resp;
-//                             // println!("[INFO] Response Data Copied:\n {}", String::from_utf8_lossy(&buf.buf[..count as usize]));
-//                         }
-//                     }
-//                     *state = TransferState::ShuttingDown(count);
-    
-//                 }
-//                 TransferState::ShuttingDown(count) => {
-//                     ready!(w.as_mut().poll_shutdown(cx))?;
-    
-//                     *state = TransferState::Done(*count);
-//                 }
-//                 TransferState::Done(count) => return Poll::Ready(Ok(*count)),
-//             }
-//         }
-//     }
-    
-
-//     pub async fn copy_bidirectional<A, B>(&mut self,a: &mut A, b: &mut B) -> io::Result<(u64, u64)>
-//     where
-//         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-//         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
-//     {
-//         self.copy_bidirectional_impl(
-//             a,
-//             b,
-//             CopyBuffer::new(super::DEFAULT_BUF_SIZE, Direction::Request),
-//             CopyBuffer::new(super::DEFAULT_BUF_SIZE, Direction::Response),
-//         )
-//         .await
-//     }
-    
-//     pub  async fn copy_bidirectional_impl<A, B>(
-//         &mut self,
-//         a: &mut A,
-//         b: &mut B,
-//         a_to_b_buffer: CopyBuffer,
-//         b_to_a_buffer: CopyBuffer,
-//     ) -> io::Result<(u64, u64)>
-//     where
-//         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-//         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
-//     {
-//         let mut a_to_b = TransferState::Running(a_to_b_buffer);
-//         let mut b_to_a = TransferState::Running(b_to_a_buffer);
-//         poll_fn(|cx| {
-//             let a_to_b = self.transfer_one_direction(cx, &mut a_to_b, a, b)?;
-//             let b_to_a = self.transfer_one_direction(cx, &mut b_to_a, b, a)?;
-    
-//             // It is not a problem if ready! returns early because transfer_one_direction for the
-//             // other direction will keep returning TransferState::Done(count) in future calls to poll
-//             let a_to_b = ready!(a_to_b);
-//             let b_to_a = ready!(b_to_a);
-    
-//             Poll::Ready(Ok((a_to_b, b_to_a)))
-//         })
-//         .await
-//     }
-//     /// Copies data in both directions between `a` and `b` using buffers of the specified size.
-//     ///
-//     /// This method is the same as the [`copy_bidirectional()`], except that it allows you to set the
-//     /// size of the internal buffers used when copying data.
-//     #[cfg_attr(docsrs, doc(cfg(feature = "io-util")))]
-//     pub async fn copy_bidirectional_with_sizes<A, B>(
-//         &mut self,
-//         a: &mut A,
-//         b: &mut B,
-//         a_to_b_buf_size: usize,
-//         b_to_a_buf_size: usize,
-//     ) -> io::Result<(u64, u64)>
-//     where
-//         A: AsyncRead + AsyncWrite + Unpin + ?Sized,
-//         B: AsyncRead + AsyncWrite + Unpin + ?Sized,
-//     {
-//         self.copy_bidirectional_impl(
-//             a,
-//             b,
-//             CopyBuffer::new(a_to_b_buf_size,Direction::Request),
-//             CopyBuffer::new(b_to_a_buf_size,Direction::Response),
-//         )
-//         .await
-//     }
     
 }
 
