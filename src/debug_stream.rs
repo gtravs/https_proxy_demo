@@ -34,13 +34,13 @@ where
 
                 let count = ready!(buf.poll_copy(cx, r.as_mut(), w.as_mut()))?;
                 // 打印每次拷贝的字节数
-                println!("[INFO] Copied {} bytes", count);
+                //println!("[INFO] Copied {} bytes", count);
                 let raw_data = String::from_utf8_lossy(&buf.buf[..count as usize]).to_string();
                 match buf.direction {
                     Direction::Request => {
                         let raw_data = String::from_utf8_lossy(&buf.buf[..count as usize]).to_string();
                         //let data  = Request::from_string(&raw_data).unwrap();
-                        //println!("[INFO] Request Data Copied:\n {:?}", req);
+                        
                     }
                     Direction::Response => {
                         let raw_data = String::from_utf8_lossy(&buf.buf[..count as usize]).to_string();

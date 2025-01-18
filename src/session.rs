@@ -1,8 +1,8 @@
 use std::{future::ready, net::SocketAddr, sync::mpsc::channel, thread::spawn};
-use anyhow::Context as ct;
+use anyhow::{Context as ct};
 use rustls::{client, ClientConfig};
 use time::SystemTime;
-use tokio::{io::{ AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::TcpStream, sync::Mutex};
+use tokio::{io::{ copy, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt}, net::TcpStream, sync::Mutex};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use crate::{debug_stream::copy_bidirectional, prelude::*};
 use std::future::poll_fn;
@@ -27,7 +27,8 @@ pub struct Session{
     // 其他
     pub session_id:u32,
     pub time: Option<SystemTime>,
-    pub stream : Option<Arc<Mutex<TcpStream>>>
+    pub stream : Option<Arc<Mutex<TcpStream>>>,
+    pub initial_data:Vec<u8>,
 }
 
 impl Session {
@@ -39,7 +40,8 @@ impl Session {
                 response: Response::default(), 
                 session_id, 
                 time: Some(SystemTime::now()), 
-                stream: Some(Arc::new(Mutex::new(stream)))
+                stream: Some(Arc::new(Mutex::new(stream))),
+                initial_data:Vec::new(),
             }
         )
     }
@@ -62,16 +64,14 @@ impl Session {
     }
 
     pub async  fn session_connect(&mut self,addr:SocketAddr) {
-        //println!("[CONNECT SATRT {}]",self.session_id);
-        //println!(" -> connection new {addr:?}");
-        //let mut stream = self.stream.as_ref().unwrap().lock().await;
         let mut buffer = [0u8;8192]; 
         let n = self.stream.as_ref().unwrap().lock().await.read(&mut buffer[..]).await.unwrap();
         // println!(" -> connect recv data {n:?} bytes.");
-
+        self.initial_data = buffer[..n].to_vec();
         let raw_data = String::from_utf8(buffer[..n].to_vec()).context("[-] connect recv data bytes failed to string.");
         let res = Request::from_string(raw_data.unwrap().as_str()).unwrap();
         self.request = res;
+
     }
 
 
@@ -151,6 +151,40 @@ impl Session {
 
     }
 
+    pub async fn handle_http(&mut self, host: String, port: String, initial_data: Vec<u8>) -> Result<(), anyhow::Error> {
+        match TcpStream::connect(format!("{}:{}",host,port)).await {
+            Ok(mut target_stream) => {
+                // 发送初始请求数据到目标服务器
+                target_stream.write_all(&initial_data).await?;
+    
+                // 从目标服务器读取响应并直接转发给原始客户端
+                if let Some(stream) = &self.stream {
+                    let mut stream_lock = stream.lock().await;
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match target_stream.read(&mut buf).await {
+                            Ok(0) => break, // 连接关闭
+                            Ok(n) => {
+                                stream_lock.write_all(&buf[..n]).await?;
+                                let raw_data = String::from_utf8_lossy(&buf[..n]).to_string();
+                                let resp  = Response::from_string(&raw_data).unwrap();
+                                self.response = resp;
+                                break;
+                            }
+                            Err(e) => {
+                                eprintln!("Read error: {:?}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[-] Connection error: {:?}", e);
+            }
+        }
+        Ok(())
+    }
     
 }
 

@@ -57,7 +57,8 @@ pub struct Request {
     pub url : String,
     pub http_version:String,
     pub headers:Vec<String>,
-    pub body: Vec<String>
+    pub body: Vec<String>,
+    pub host: String,
 }
 
 impl Request {
@@ -79,13 +80,24 @@ impl Request {
             let headers_vec:Vec<String> = lines.map(|line|line.to_string()).collect();
             let pos = headers_vec.iter().position(|line|line.is_empty()).unwrap();
             let headers = headers_vec[..pos].to_vec();
+            let host_line = headers.iter()
+                .find(|line| line.to_lowercase().starts_with("host:"))
+                .map(|line| {
+                    // 去掉"Host:"前缀并删除首尾空格
+                    line.splitn(2, ':')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                });
             Some(
                 Request{
                     method :Method::from_str(method).unwrap(),
                     url: split_first[1].to_string(),
                     http_version:split_first[2].to_string(),
                     headers,
-                    body:Vec::new()
+                    body:Vec::new(),
+                    host:host_line.unwrap(),
                 }
             )            
         } else {
@@ -94,29 +106,51 @@ impl Request {
             //println!("     [DEBUG] HTTP DATA {next_lines:?}");   
             let pos = next_lines.iter().position(|line|line.is_empty()).unwrap();
             if (pos == next_lines.len()-1) {
-                println!("     [DEBUG] None Body.");
+                //println!("     [DEBUG] None Body.");
                 let headers = next_lines[..pos].to_vec();
                 let body  = Vec::new();
+                let host_line = headers.iter()
+                .find(|line| line.to_lowercase().starts_with("host:"))
+                .map(|line| {
+                    // 去掉"Host:"前缀并删除首尾空格
+                    line.splitn(2, ':')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                });
                 Some(
                 Request{
                     method: Method::from_str(method).unwrap(),
                     url: split_first[1].to_string(),
                     http_version: split_first[2].to_string(),
                     headers,
-                    body
+                    body,
+                    host:host_line.unwrap(),
                 }
                 )
 
             } else {
                 let headers = next_lines[..pos].to_vec();
                 let body  = next_lines[pos+1..].to_vec();
+                let host_line = headers.iter()
+                .find(|line| line.to_lowercase().starts_with("host:"))
+                .map(|line| {
+                    // 去掉"Host:"前缀并删除首尾空格
+                    line.splitn(2, ':')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                });
                 Some(
                 Request{
                     method: Method::from_str(method).unwrap(),
                     url: split_first[1].to_string(),
                     http_version: split_first[2].to_string(),
                     headers,
-                    body
+                    body,
+                    host:host_line.unwrap(),
                 }
                 )
             }
@@ -162,9 +196,10 @@ impl Response {
 
         // 如果内容非空，填充到 data 字段
         if !body_text.is_empty() {
-            response.data = Some(body_text);
+            response.data = Some(body_text.to_string());
         }
 
+        response.error = Some(response.message.clone());
         // 如果状态码表示错误，填充到 error 字段
         // if response.status_code >= "400" {
         //     response.error = Some(response.message.clone());
